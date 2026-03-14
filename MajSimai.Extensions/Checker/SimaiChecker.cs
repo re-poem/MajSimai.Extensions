@@ -1,43 +1,254 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
+using System.Globalization;
 
 namespace MajSimai.Extensions.Checker;
 
-/// <summary>
-/// Simai谱面语法检查器
-/// </summary>
 public static class SimaiChecker
 {
-    private static readonly string[] SLIDE_TYPES = ["qq", "pp", "q", "p", "w", "z", "s", "V", "v", "<", ">", "^", "-"];
-    private static readonly char[] SENSOR_TYPES = ['A', 'B', 'C', 'D', 'E'];
+    private static readonly char[] SlideTypeChars = ['-', '^', 'v', '<', '>', 'V', 'p', 'q', 's', 'z', 'w'];
+    private static readonly string[] SlideTypeDoubleChars = ["pp", "qq"];
+    private static readonly char[] TouchSensorTypes = ['A', 'B', 'C', 'D', 'E'];
 
-    /// <summary>
-    /// 检查Simai谱面语法
-    /// </summary>
-    /// <param name="fumen">谱面字符串</param>
-    /// <returns>诊断信息列表</returns>
     public static IReadOnlyList<Diagnostic> Check(string fumen)
     {
         var context = new CheckerContext(fumen);
-        var segments = SplitIntoSegments(fumen);
+        
+        var (cleanedFumen, positionMap, newlines) = PreprocessNewlines(fumen, context);
+        
+        var segments = SplitIntoSegments(cleanedFumen, positionMap, context);
 
-        foreach (var segment in segments)
+        for (var i = 0; i < segments.Count; i++)
         {
-            CheckSegment(context, segment, fumen);
+            CheckSegment(context, segments[i]);
         }
 
-        CheckChartTermination(context, segments, fumen);
-
+        CheckChartTermination(context, segments);
         return context.Diagnostics;
     }
 
-    private static List<ChartSegment> SplitIntoSegments(string fumen)
+    private static (string CleanedFumen, List<TextPosition> PositionMap, List<(int Index, TextPosition OriginalPos)> Newlines) 
+        PreprocessNewlines(string fumen, CheckerContext context)
+    {
+        var cleanedChars = new List<char>();
+        var positionMap = new List<TextPosition>();
+        var newlines = new List<(int Index, TextPosition OriginalPos)>();
+        
+        var originalPos = TextPosition.Start;
+        
+        for (var i = 0; i < fumen.Length; i++)
+        {
+            var c = fumen[i];
+            
+            if (c == '\n')
+            {
+                newlines.Add((i, originalPos));
+                originalPos = originalPos.Advance(c);
+                continue;
+            }
+            
+            if (c == '\r')
+            {
+                originalPos = originalPos.Advance(c);
+                continue;
+            }
+            
+            cleanedChars.Add(c);
+            positionMap.Add(originalPos);
+            originalPos = originalPos.Advance(c);
+        }
+        
+        var cleanedFumen = new string(cleanedChars.ToArray());
+        
+        CheckNewlinePositions(fumen, cleanedFumen, positionMap, newlines, context);
+        
+        return (cleanedFumen, positionMap, newlines);
+    }
+
+    private static void CheckNewlinePositions(
+        string originalFumen, 
+        string cleanedFumen, 
+        List<TextPosition> positionMap,
+        List<(int Index, TextPosition OriginalPos)> newlines,
+        CheckerContext context)
+    {
+        foreach (var (newlineIndex, originalPos) in newlines)
+        {
+            var isValidPosition = IsNewlineAtValidPosition(originalFumen, newlineIndex);
+            
+            if (!isValidPosition)
+            {
+                context.AddWarning(
+                    "Newline inside definition or note",
+                    "Newlines should not appear inside BPM, HSpeed, Beat definitions, or note content. The newline will be ignored during parsing.",
+                    originalPos
+                );
+            }
+        }
+    }
+
+    private static bool IsNewlineAtValidPosition(string fumen, int newlineIndex)
+    {
+        var beforeContext = GetContextBefore(fumen, newlineIndex);
+        var afterContext = GetContextAfter(fumen, newlineIndex);
+        
+        if (IsInsideBpmDefinition(beforeContext, afterContext))
+            return false;
+        
+        if (IsInsideHsDefinition(beforeContext, afterContext))
+            return false;
+        
+        if (IsInsideBeatDefinition(beforeContext, afterContext))
+            return false;
+        
+        if (IsInsideNoteContent(beforeContext, afterContext))
+            return false;
+        
+        return true;
+    }
+
+    private static string GetContextBefore(string fumen, int index)
+    {
+        var start = Math.Max(0, index - 100);
+        return fumen[start..index];
+    }
+
+    private static string GetContextAfter(string fumen, int index)
+    {
+        var end = Math.Min(fumen.Length, index + 100);
+        return fumen[(index + 1)..end];
+    }
+
+    private static bool IsInsideBpmDefinition(string before, string after)
+    {
+        var lastOpenParen = before.LastIndexOf('(');
+        if (lastOpenParen == -1) return false;
+        
+        var lastCloseParen = before.LastIndexOf(')');
+        if (lastCloseParen != -1 && lastCloseParen > lastOpenParen) return false;
+        
+        var closeParenAfter = after.IndexOf(')');
+        if (closeParenAfter == -1) return true;
+        
+        var openParenAfter = after.IndexOf('(');
+        if (openParenAfter != -1 && openParenAfter < closeParenAfter) return false;
+        
+        return true;
+    }
+
+    private static bool IsInsideHsDefinition(string before, string after)
+    {
+        var lastHsStart = before.LastIndexOf("<HS*");
+        if (lastHsStart == -1) return false;
+        
+        var afterHsStart = before[lastHsStart..];
+        var lastCloseAngle = afterHsStart.LastIndexOf('>');
+        if (lastCloseAngle != -1) return false;
+        
+        var closeAngleAfter = after.IndexOf('>');
+        if (closeAngleAfter == -1) return true;
+        
+        return true;
+    }
+
+    private static bool IsInsideBeatDefinition(string before, string after)
+    {
+        var lastOpenBrace = before.LastIndexOf('{');
+        if (lastOpenBrace == -1) return false;
+        
+        var lastCloseBrace = before.LastIndexOf('}');
+        if (lastCloseBrace != -1 && lastCloseBrace > lastOpenBrace) return false;
+        
+        var closeBraceAfter = after.IndexOf('}');
+        if (closeBraceAfter == -1) return true;
+        
+        var openBraceAfter = after.IndexOf('{');
+        if (openBraceAfter != -1 && openBraceAfter < closeBraceAfter) return false;
+        
+        return true;
+    }
+
+    private static bool IsInsideNoteContent(string before, string after)
+    {
+        var lastComma = before.LastIndexOf(',');
+        var lastCommaAfter = after.IndexOf(',');
+        
+        var afterTrimmed = after.TrimStart();
+        var beforeTrimmed = before.TrimEnd();
+        
+        if (beforeTrimmed.Length == 0 || afterTrimmed.Length == 0)
+            return false;
+        
+        if (afterTrimmed.StartsWith("(") || 
+            afterTrimmed.StartsWith("{") || 
+            afterTrimmed.StartsWith("<HS*") ||
+            afterTrimmed.StartsWith("E") ||
+            afterTrimmed.StartsWith("||"))
+            return false;
+        
+        var lastCharBefore = beforeTrimmed[^1];
+        var firstCharAfter = afterTrimmed[0];
+        
+        if (lastCharBefore == ',')
+            return false;
+        
+        if (char.IsDigit(lastCharBefore) || IsTouchSensorType(lastCharBefore))
+        {
+            if (char.IsDigit(firstCharAfter) || 
+                IsTouchSensorType(firstCharAfter) ||
+                IsNoteModifier(firstCharAfter) ||
+                IsSlideChar(firstCharAfter))
+                return true;
+        }
+        
+        if (IsNoteModifier(lastCharBefore) || lastCharBefore == ']' || lastCharBefore == ')')
+        {
+            if (char.IsDigit(firstCharAfter) || IsTouchSensorType(firstCharAfter))
+                return true;
+        }
+        
+        if (lastCharBefore == '[')
+            return true;
+        
+        if (afterTrimmed.StartsWith("]"))
+            return true;
+        
+        return false;
+    }
+
+    private static bool IsNoteModifier(char c)
+    {
+        return c switch
+        {
+            'h' or 'H' or 'b' or 'B' or 'x' or 'X' or 'm' or 'M' or 
+            '$' or '@' or '?' or '!' or '*' or '/' or '`' or 'f' or 'F' => true,
+            _ => false
+        };
+    }
+
+    private static bool IsSlideChar(char c)
+    {
+        foreach (var slideChar in SlideTypeChars)
+        {
+            if (c == slideChar) return true;
+        }
+        return false;
+    }
+
+    private static bool IsTouchSensorType(char c)
+    {
+        var upper = char.ToUpperInvariant(c);
+        foreach (var t in TouchSensorTypes)
+        {
+            if (upper == t) return true;
+        }
+        return false;
+    }
+
+    private static List<ChartSegment> SplitIntoSegments(string fumen, List<TextPosition> positionMap, CheckerContext context)
     {
         var segments = new List<ChartSegment>();
         var currentStart = 0;
-        var pos = TextPosition.Start;
         var inComment = false;
 
         for (var i = 0; i < fumen.Length; i++)
@@ -46,11 +257,11 @@ public static class SimaiChecker
 
             if (inComment)
             {
-                if (c == '\n')
+                if (c == '|' && i + 1 < fumen.Length && fumen[i + 1] == '|')
                 {
                     inComment = false;
+                    i++;
                     currentStart = i + 1;
-                    pos = pos.Advance(c);
                 }
                 continue;
             }
@@ -59,11 +270,11 @@ public static class SimaiChecker
             {
                 if (i > currentStart)
                 {
-                    segments.Add(new ChartSegment(fumen[currentStart..i], pos, i - currentStart));
+                    var startPos = GetOriginalPosition(positionMap, currentStart);
+                    segments.Add(new ChartSegment(fumen[currentStart..i], startPos, i - currentStart));
                 }
                 inComment = true;
                 i++;
-                pos = pos.Advance('|').Advance('|');
                 currentStart = i + 1;
                 continue;
             }
@@ -72,28 +283,41 @@ public static class SimaiChecker
             {
                 if (i > currentStart)
                 {
-                    segments.Add(new ChartSegment(fumen[currentStart..i], pos, i - currentStart));
+                    var startPos = GetOriginalPosition(positionMap, currentStart);
+                    segments.Add(new ChartSegment(fumen[currentStart..i], startPos, i - currentStart));
                 }
-                pos = pos.Advance(c);
+                var commaPos = GetOriginalPosition(positionMap, i);
+                segments.Add(new ChartSegment(",", commaPos, 1));
                 currentStart = i + 1;
-            }
-            else
-            {
-                pos = pos.Advance(c);
             }
         }
 
         if (currentStart < fumen.Length)
         {
-            segments.Add(new ChartSegment(fumen[currentStart..], pos, fumen.Length - currentStart));
+            var startPos = GetOriginalPosition(positionMap, currentStart);
+            segments.Add(new ChartSegment(fumen[currentStart..], startPos, fumen.Length - currentStart));
         }
 
         return segments;
     }
 
-    private static void CheckSegment(CheckerContext context, ChartSegment segment, string fumen)
+    private static TextPosition GetOriginalPosition(List<TextPosition> positionMap, int cleanedIndex)
+    {
+        if (positionMap == null || positionMap.Count == 0)
+            return TextPosition.Start;
+            
+        if (cleanedIndex >= positionMap.Count)
+            cleanedIndex = positionMap.Count - 1;
+        if (cleanedIndex < 0)
+            cleanedIndex = 0;
+            
+        return positionMap[cleanedIndex];
+    }
+
+    private static void CheckSegment(CheckerContext context, ChartSegment segment)
     {
         if (string.IsNullOrWhiteSpace(segment.Content)) return;
+        if (segment.Content == ",") return;
 
         var content = segment.Content;
         var startPos = segment.StartPosition;
@@ -103,74 +327,109 @@ public static class SimaiChecker
             return;
         }
 
-        // HSpeed 必须在 segment 开头
-        if (content.StartsWith("<HS*"))
-        {
-            content = CheckHSpeedSyntax(context, content, startPos);
-        }
-        else
-        {
-            var hspeedElsewhere = content.IndexOf("<HS*");
-            if (hspeedElsewhere != -1)
-            {
-                context.AddError(
-                    "HSpeed must be at segment start",
-                    "HSpeed definition must appear at the beginning of a segment, before any notes",
-                    startPos.Advance(content[..hspeedElsewhere])
-                );
-            }
-        }
-
-        // BPM 必须在 segment 开头（HSpeed 之后）
         var noteStart = 0;
-        if (content.StartsWith('('))
+        var processedOriginalLength = 0;
+
+        while (true)
         {
-            var bpmEnd = content.IndexOf(')');
-            CheckBpmDefinition(context, content, startPos);
-            if (bpmEnd == -1) return;
-            noteStart = bpmEnd + 1;
-        }
-        else
-        {
-            var bpmElsewhere = content.IndexOf('(');
-            if (bpmElsewhere != -1)
+            var processedSomething = false;
+
+            if (content.StartsWith("<HS*"))
             {
-                context.AddError(
-                    "BPM must be at segment start",
-                    "BPM definition must appear at the beginning of a segment, before any notes",
-                    startPos.Advance(content[..bpmElsewhere])
-                );
+                var remaining = CheckHSpeedSyntax(context, content, startPos.Advance(segment.Content[..processedOriginalLength]));
+                processedOriginalLength += content.Length - remaining.Length;
+                content = remaining;
+                noteStart = processedOriginalLength;
+                if (string.IsNullOrEmpty(content)) return;
+                processedSomething = true;
             }
-        }
-
-        // 拍号必须在 BPM 之后（或 segment 开头）
-        if (noteStart < content.Length && content[noteStart..].StartsWith('{'))
-        {
-            var localBeatEnd = content[noteStart..].IndexOf('}');
-            CheckBeatDefinition(context, content[noteStart..], startPos.Advance(content[..noteStart]));
-            if (localBeatEnd == -1) return;
-            noteStart += localBeatEnd + 1;
-        }
-        else
-        {
-            var beatElsewhere = content.IndexOf('{');
-            if (beatElsewhere != -1 && beatElsewhere >= noteStart)
+            else if (content.Contains("<HS*"))
             {
-                context.AddError(
-                    "Beat definition must be at segment start",
-                    "Beat definition must appear after BPM (if any), before any notes",
-                    startPos.Advance(content[..beatElsewhere])
-                );
+                var idx = content.IndexOf("<HS*");
+                var hspeedEnd = content.IndexOf('>', idx);
+                if (hspeedEnd != -1)
+                {
+                    CheckHSpeedSyntax(context, content[idx..], startPos.Advance(segment.Content[..(processedOriginalLength + idx)]));
+                    processedOriginalLength += hspeedEnd + 1;
+                    content = content[(hspeedEnd + 1)..];
+                    noteStart = processedOriginalLength;
+                    processedSomething = true;
+                }
             }
+
+            if (content.StartsWith('('))
+            {
+                var bpmEnd = content.IndexOf(')');
+                CheckBpmDefinition(context, content, startPos.Advance(segment.Content[..processedOriginalLength]));
+                context.HasBpmDefinition = true;
+                if (bpmEnd == -1) return;
+                processedOriginalLength += bpmEnd + 1;
+                content = content[(bpmEnd + 1)..];
+                noteStart = processedOriginalLength;
+                processedSomething = true;
+            }
+            else if (content.Contains('('))
+            {
+                var idx = content.IndexOf('(');
+                var bpmEnd = content.IndexOf(')', idx);
+                if (bpmEnd != -1)
+                {
+                    CheckBpmDefinition(context, content[idx..], startPos.Advance(segment.Content[..(processedOriginalLength + idx)]));
+                    context.HasBpmDefinition = true;
+                    processedOriginalLength += bpmEnd + 1;
+                    content = content[(bpmEnd + 1)..];
+                    noteStart = processedOriginalLength;
+                    processedSomething = true;
+                }
+            }
+
+            if (content.StartsWith('{'))
+            {
+                var beatEnd = content.IndexOf('}');
+                if (!context.HasBpmDefinition)
+                {
+                    context.AddError(
+                        "Beat definition without prior BPM",
+                        "A BPM definition must appear before any beat definition in the chart",
+                        startPos.Advance(segment.Content[..processedOriginalLength])
+                    );
+                }
+                CheckBeatDefinition(context, content, startPos.Advance(segment.Content[..processedOriginalLength]));
+                if (beatEnd == -1) return;
+                processedOriginalLength += beatEnd + 1;
+                content = content[(beatEnd + 1)..];
+                noteStart = processedOriginalLength;
+                processedSomething = true;
+            }
+            else if (content.Contains('{'))
+            {
+                var idx = content.IndexOf('{');
+                if (!context.HasBpmDefinition)
+                {
+                    context.AddError(
+                        "Beat definition without prior BPM",
+                        "A BPM definition must appear before any beat definition in the chart",
+                        startPos.Advance(segment.Content[..(processedOriginalLength + idx)])
+                    );
+                }
+                var beatEnd = content.IndexOf('}', idx);
+                if (beatEnd != -1)
+                {
+                    CheckBeatDefinition(context, content[idx..], startPos.Advance(segment.Content[..(processedOriginalLength + idx)]));
+                    processedOriginalLength += beatEnd + 1;
+                    content = content[(beatEnd + 1)..];
+                    noteStart = processedOriginalLength;
+                    processedSomething = true;
+                }
+            }
+
+            if (!processedSomething) break;
         }
 
-        // 没有note
-        if (noteStart >= content.Length) return;
-        var noteContent = content[noteStart..];
-        if (string.IsNullOrEmpty(noteContent)) return;
+        if (string.IsNullOrEmpty(content)) return;
 
-        var noteStartPos = startPos.Advance(content[..noteStart]);
-        CheckNoteGroup(context, noteContent, noteStartPos, fumen);
+        var noteStartPos = startPos.Advance(segment.Content[..noteStart]);
+        CheckNoteGroup(context, content, noteStartPos);
     }
 
     private static string CheckHSpeedSyntax(CheckerContext context, string content, TextPosition startPos)
@@ -197,11 +456,11 @@ public static class SimaiChecker
             return content[(hspeedEnd + 1)..];
         }
 
-        if (!double.TryParse(hspeedContent, out var hspeed) || hspeed <= 0)
+        if (!double.TryParse(hspeedContent, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
         {
             context.AddError(
                 $"Invalid HSpeed value: '{hspeedContent}'",
-                "HSpeed must be a positive number",
+                "HSpeed must be a number",
                 startPos.Advance("<HS*")
             );
         }
@@ -234,7 +493,7 @@ public static class SimaiChecker
             return;
         }
 
-        if (!double.TryParse(bpmContent, out var bpm) || bpm <= 0)
+        if (!double.TryParse(bpmContent, NumberStyles.Float, CultureInfo.InvariantCulture, out var bpm) || bpm <= 0)
         {
             context.AddError(
                 $"Invalid BPM value: '{bpmContent}'",
@@ -272,7 +531,7 @@ public static class SimaiChecker
         if (beatContent.StartsWith('#'))
         {
             var timeValue = beatContent[1..];
-            if (!double.TryParse(timeValue, out var time) || time <= 0)
+            if (!double.TryParse(timeValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var time) || time <= 0)
             {
                 context.AddError(
                     $"Invalid absolute time value: '{timeValue}'",
@@ -294,7 +553,7 @@ public static class SimaiChecker
         }
     }
 
-    private static void CheckNoteGroup(CheckerContext context, string content, TextPosition startPos, string fumen)
+    private static void CheckNoteGroup(CheckerContext context, string content, TextPosition startPos)
     {
         var notes = SplitByEach(content);
 
@@ -309,7 +568,7 @@ public static class SimaiChecker
                 );
                 continue;
             }
-            CheckSingleNote(context, note.Content, startPos.Advance(content[..note.StartIndex]), fumen);
+            CheckSingleNote(context, note.Content, startPos.Advance(content[..note.StartIndex]));
         }
     }
 
@@ -320,13 +579,7 @@ public static class SimaiChecker
 
         for (var i = 0; i < content.Length; i++)
         {
-            if (content[i] == '/')
-            {
-                if (i > currentStart)
-                    result.Add((content[currentStart..i], currentStart));
-                currentStart = i + 1;
-            }
-            else if (content[i] == '`')
+            if (content[i] == '/' || content[i] == '`')
             {
                 if (i > currentStart)
                     result.Add((content[currentStart..i], currentStart));
@@ -340,46 +593,44 @@ public static class SimaiChecker
         return result;
     }
 
-    private static void CheckSingleNote(CheckerContext context, string content, TextPosition startPos, string fumen)
+    private static void CheckSingleNote(CheckerContext context, string content, TextPosition startPos)
     {
         if (string.IsNullOrEmpty(content)) return;
 
-        if (IsTouchNote(content, out var sensorType, out var sensorIndex, out var hasFirework, out var isHold))
+        if (IsTouchNote(content, out var sensorType, out var sensorIndex))
         {
-            CheckTouchNote(context, content, startPos, sensorType, sensorIndex, hasFirework, isHold);
+            CheckTouchNote(context, content, startPos, sensorType, sensorIndex);
             return;
         }
 
         if (char.IsDigit(content[0]))
         {
-            CheckButtonNote(context, content, startPos, fumen);
+            CheckButtonNote(context, content, startPos);
             return;
         }
 
         context.AddError(
             $"Invalid note: '{content}'",
-            "Note must start with a button number (1-8) or sensor type (A-E, C)",
+            "Note must start with a button number (1-8) or sensor type (A-E)",
             startPos
         );
     }
 
-    private static bool IsTouchNote(string content, out char sensorType, out int? sensorIndex, out bool hasFirework, out bool isHold)
+    private static bool IsTouchNote(string content, out char sensorType, out int? sensorIndex)
     {
         sensorType = '\0';
         sensorIndex = null;
-        hasFirework = false;
-        isHold = false;
 
         if (string.IsNullOrEmpty(content)) return false;
 
         var c = char.ToUpperInvariant(content[0]);
-        if (!SENSOR_TYPES.Contains(c) && c != 'C') return false;
+        if (!IsTouchSensorType(c)) return false;
 
         sensorType = c;
 
         if (content.Length == 1)
         {
-            return c == 'C';
+            return sensorType == 'C';
         }
 
         var idx = 1;
@@ -389,18 +640,10 @@ public static class SimaiChecker
             idx++;
         }
 
-        if (content.Length > idx)
-        {
-            var remaining = content[idx..];
-            isHold = remaining.Contains('h');
-            hasFirework = remaining.Contains('f');
-        }
-
         return true;
     }
 
-    private static void CheckTouchNote(CheckerContext context, string content, TextPosition startPos,
-        char sensorType, int? sensorIndex, bool hasFirework, bool isHold)
+    private static void CheckTouchNote(CheckerContext context, string content, TextPosition startPos, char sensorType, int? sensorIndex)
     {
         if (sensorType == 'C')
         {
@@ -425,13 +668,12 @@ public static class SimaiChecker
             }
         }
 
-        var validChars = new HashSet<char> { 'f', 'h', 'x' };
         var idx = 1;
         if (sensorIndex.HasValue) idx++;
 
-        var hasDuration = false;
-        var durationStart = 0;
-        var durationEnd = 0;
+        var isHold = false;
+        var durationStart = -1;
+        var durationEnd = -1;
 
         for (var i = idx; i < content.Length; i++)
         {
@@ -439,7 +681,14 @@ public static class SimaiChecker
 
             if (c == '[')
             {
-                hasDuration = true;
+                if (durationStart != -1)
+                {
+                    context.AddError(
+                        "Duplicate duration bracket",
+                        "Touch note can only have one duration specification",
+                        startPos.Advance(content[..i])
+                    );
+                }
                 durationStart = i;
                 var closeIdx = content.IndexOf(']', i);
                 if (closeIdx == -1)
@@ -456,22 +705,32 @@ public static class SimaiChecker
                 continue;
             }
 
-            if (!validChars.Contains(c))
+            switch (c)
             {
-                context.AddError(
-                    $"Invalid character in touch note: '{content[i]}'",
-                    "Touch notes can only contain 'f' (firework), 'h' (hold), or 'x' (EX) modifiers",
-                    startPos.Advance(content[..i])
-                );
+                case 'h':
+                    isHold = true;
+                    break;
+                case 'f':
+                case 'x':
+                case 'b':
+                case 'm':
+                    break;
+                default:
+                    context.AddError(
+                        $"Invalid character in touch note: '{content[i]}'",
+                        "Touch notes can only contain 'f' (firework), 'h' (hold), 'x' (EX), 'b' (break), 'm' (mine) modifiers",
+                        startPos.Advance(content[..i])
+                    );
+                    break;
             }
         }
 
-        if (isHold && hasDuration)
+        if (isHold && durationStart != -1)
         {
             var duration = content[(durationStart + 1)..durationEnd];
-            ValidateDuration(context, content, startPos, duration, durationStart, "TOUCH HOLD");
+            ValidateDuration(context, content, startPos, duration, durationStart, "TOUCH HOLD", allowSlideFormat: false);
         }
-        else if (hasDuration && !isHold)
+        else if (durationStart != -1 && !isHold)
         {
             context.AddWarning(
                 "Duration specified for non-hold touch note",
@@ -481,7 +740,7 @@ public static class SimaiChecker
         }
     }
 
-    private static void CheckButtonNote(CheckerContext context, string content, TextPosition startPos, string fumen)
+    private static void CheckButtonNote(CheckerContext context, string content, TextPosition startPos)
     {
         var firstDigit = content[0] - '0';
         if (firstDigit < 1 || firstDigit > 8)
@@ -494,12 +753,9 @@ public static class SimaiChecker
             return;
         }
 
-        if (content.Length == 1)
-        {
-            return;
-        }
+        if (content.Length == 1) return;
 
-        if (char.IsDigit(content[1]) && content.Length == 2)
+        if (char.IsDigit(content[1]) && (content.Length == 2 || !IsSlideChar(content[1])))
         {
             var secondDigit = content[1] - '0';
             if (secondDigit < 1 || secondDigit > 8)
@@ -515,168 +771,168 @@ public static class SimaiChecker
 
         var noteInfo = ParseNoteInfo(content);
         ValidateNoteInfo(context, content, startPos, noteInfo);
-        ValidateSlideChain(context, content, startPos, noteInfo);
-    }
-
-    private static void ValidateSlideChain(CheckerContext context, string content, TextPosition startPos, NoteInfo noteInfo)
-    {
-        if (noteInfo.Slides.Count == 0) return;
-
-        var hasSameStartPoint = content.Contains('*');
-        var hasConnectedSlides = noteInfo.Slides.Count > 1 && !hasSameStartPoint;
-
-        if (hasConnectedSlides)
-        {
-            var previousEnd = noteInfo.StartPosition;
-            var allHaveDuration = true;
-            var noneHaveDuration = true;
-
-            for (var i = 0; i < noteInfo.Slides.Count; i++)
-            {
-                var slide = noteInfo.Slides[i];
-
-                if (slide.EndPosition == null) continue;
-
-                if (i > 0 && slide.StartPosition != previousEnd)
-                {
-                    context.AddError(
-                        $"Connected slide chain broken at segment {i + 1}",
-                        $"Each connected slide must start where the previous one ended. Expected start at {previousEnd}, but slide starts at {slide.StartPosition}",
-                        startPos.Advance(content[..slide.StartIndex])
-                    );
-                }
-
-                if (slide.Duration != null)
-                {
-                    noneHaveDuration = false;
-                }
-                else
-                {
-                    allHaveDuration = false;
-                }
-
-                previousEnd = slide.EndPosition.Value;
-            }
-
-            if (!allHaveDuration && !noneHaveDuration)
-            {
-                context.AddError(
-                    "Inconsistent duration specification in connected slide",
-                    "Either all segments must have individual durations, or only the last segment should have a duration",
-                    startPos
-                );
-            }
-
-            if (noteInfo.Slides.Count(s => s.IsBreak) > 1)
-            {
-                context.AddWarning(
-                    "Multiple BREAK markers in connected slide",
-                    "Only the last segment of a connected slide should have the BREAK marker 'b'",
-                    startPos
-                );
-            }
-        }
-
-        if (hasSameStartPoint)
-        {
-            var slideParts = content.Split('*');
-            var expectedStart = noteInfo.StartPosition;
-
-            foreach (var part in slideParts.Skip(1))
-            {
-                if (string.IsNullOrEmpty(part)) continue;
-
-                var partInfo = ParseNoteInfo(expectedStart.ToString() + part);
-                if (partInfo.Slides.Count > 0)
-                {
-                    var slide = partInfo.Slides[0];
-                    if (slide.Duration == null)
-                    {
-                        context.AddError(
-                            "Same-start-point slide missing duration",
-                            "Each slide in a same-start-point group must have its own duration",
-                            startPos
-                        );
-                    }
-                }
-            }
-        }
     }
 
     private static NoteInfo ParseNoteInfo(string content)
     {
-        var info = new NoteInfo();
-        var idx = 0;
-
-        if (char.IsDigit(content[0]))
+        var info = new NoteInfo
         {
-            info.StartPosition = content[0] - '0';
-            idx = 1;
-        }
+            StartPosition = content[0] - '0'
+        };
+
+        var idx = 1;
+        var lastSlideEndPosition = info.StartPosition;
 
         while (idx < content.Length)
         {
             var c = content[idx];
 
-            if (c == 'h') { info.IsHold = true; idx++; continue; }
-            if (c == 'b') { info.IsBreak = true; idx++; continue; }
-            if (c == 'x') { info.IsEx = true; idx++; continue; }
-            if (c == 'm') { info.IsMine = true; idx++; continue; }
-            if (c == '$')
+            switch (char.ToLowerInvariant(c))
             {
-                info.HasStar = true;
-                if (idx + 1 < content.Length && content[idx + 1] == '$')
-                {
-                    info.HasDoubleStar = true;
-                    idx += 2;
-                }
-                else
-                {
+                case 'h':
+                    info.IsHold = true;
                     idx++;
-                }
-                continue;
+                    break;
+                case 'b':
+                    if (info.Slides.Count > 0)
+                    {
+                        var lastSlide = info.Slides[^1];
+                        if (idx + 1 < content.Length && content[idx + 1] == '[')
+                        {
+                            lastSlide.IsBreak = true;
+                        }
+                        else if (idx == content.Length - 1)
+                        {
+                            lastSlide.IsBreak = true;
+                        }
+                        else
+                        {
+                            info.IsBreak = true;
+                        }
+                    }
+                    else
+                    {
+                        info.IsBreak = true;
+                    }
+                    idx++;
+                    break;
+                case 'x':
+                    info.IsEx = true;
+                    idx++;
+                    break;
+                case 'm':
+                    if (info.Slides.Count > 0)
+                    {
+                        var lastSlide = info.Slides[^1];
+                        if (idx + 1 < content.Length && content[idx + 1] == '[')
+                        {
+                            lastSlide.IsMine = true;
+                        }
+                        else if (idx == content.Length - 1)
+                        {
+                            lastSlide.IsMine = true;
+                        }
+                        else
+                        {
+                            info.IsMine = true;
+                        }
+                    }
+                    else
+                    {
+                        info.IsMine = true;
+                    }
+                    idx++;
+                    break;
+                case '$':
+                    info.HasStar = true;
+                    if (idx + 1 < content.Length && content[idx + 1] == '$')
+                    {
+                        info.HasDoubleStar = true;
+                        idx += 2;
+                    }
+                    else
+                    {
+                        idx++;
+                    }
+                    break;
+                case '@':
+                    info.NoStar = true;
+                    idx++;
+                    break;
+                case '?':
+                    info.FadeSlide = true;
+                    idx++;
+                    break;
+                case '!':
+                    info.NoFadeSlide = true;
+                    idx++;
+                    break;
+                case '[':
+                    var closeIdx = content.IndexOf(']', idx);
+                    if (closeIdx != -1)
+                    {
+                        if (info.Slides.Count > 0)
+                        {
+                            var lastSlide = info.Slides[^1];
+                            lastSlide.Duration = content[(idx + 1)..closeIdx];
+                            lastSlide.DurationStart = idx;
+                            lastSlide.DurationEnd = closeIdx;
+                        }
+                        else
+                        {
+                            info.Duration = content[(idx + 1)..closeIdx];
+                            info.DurationStart = idx;
+                            info.DurationEnd = closeIdx;
+                        }
+                        idx = closeIdx + 1;
+                    }
+                    else
+                    {
+                        if (info.Slides.Count > 0)
+                        {
+                            var lastSlide = info.Slides[^1];
+                            lastSlide.Duration = content[(idx + 1)..];
+                            lastSlide.DurationStart = idx;
+                            info.DurationEnd = content.Length - 1;
+                        }
+                        else
+                        {
+                            info.Duration = content[(idx + 1)..];
+                            info.DurationStart = idx;
+                            info.DurationEnd = content.Length - 1;
+                        }
+                        idx = content.Length;
+                    }
+                    break;
+                case '*':
+                    info.HasSameStartPointSlides = true;
+                    idx++;
+                    lastSlideEndPosition = info.StartPosition;
+                    info.NextSlideIsSameHeadChainStart = true;
+                    break;
+                default:
+                    var slideMatch = TryMatchSlide(content, idx, lastSlideEndPosition);
+                    if (slideMatch != null)
+                    {
+                        if (info.NextSlideIsSameHeadChainStart)
+                        {
+                            slideMatch.IsSameHeadChainStart = true;
+                            info.NextSlideIsSameHeadChainStart = false;
+                        }
+                        info.Slides.Add(slideMatch);
+                        idx = slideMatch.EndIndex;
+                        if (slideMatch.EndPosition.HasValue)
+                        {
+                            lastSlideEndPosition = slideMatch.EndPosition.Value;
+                        }
+                    }
+                    else
+                    {
+                        info.UnknownChars.Add((c, idx));
+                        idx++;
+                    }
+                    break;
             }
-            if (c == '@') { info.NoStar = true; idx++; continue; }
-            if (c == '?') { info.FadeSlide = true; idx++; continue; }
-            if (c == '!') { info.NoFadeSlide = true; idx++; continue; }
-
-            if (c == '[')
-            {
-                var closeIdx = content.IndexOf(']', idx);
-                if (closeIdx != -1)
-                {
-                    info.Duration = content[(idx + 1)..closeIdx];
-                    info.DurationStart = idx;
-                    info.DurationEnd = closeIdx;
-                    idx = closeIdx + 1;
-                }
-                else
-                {
-                    info.Duration = content[(idx + 1)..];
-                    info.DurationStart = idx;
-                    info.DurationEnd = content.Length - 1;
-                    idx = content.Length;
-                }
-                continue;
-            }
-
-            if (c == '*')
-            {
-                info.HasSameStartPointSlides = true;
-                idx++;
-                continue;
-            }
-
-            var slideMatch = TryMatchSlide(content, idx, info.StartPosition);
-            if (slideMatch != null)
-            {
-                info.Slides.Add(slideMatch);
-                idx = slideMatch.EndIndex;
-                continue;
-            }
-
-            info.UnknownChars.Add((c, idx));
-            idx++;
         }
 
         return info;
@@ -687,14 +943,26 @@ public static class SimaiChecker
         var idx = startIdx;
         var slide = new SlideInfo { StartIndex = idx, StartPosition = noteStartPosition };
 
-        foreach (var slideType in SLIDE_TYPES.OrderByDescending(s => s.Length))
+        foreach (var doubleChar in SlideTypeDoubleChars)
         {
-            if (idx + slideType.Length <= content.Length &&
-                content[idx..(idx + slideType.Length)] == slideType)
+            if (idx + 2 <= content.Length && content[idx..(idx + 2)] == doubleChar)
             {
-                slide.SlideType = slideType;
-                idx += slideType.Length;
+                slide.SlideType = doubleChar;
+                idx += 2;
                 break;
+            }
+        }
+
+        if (slide.SlideType == null)
+        {
+            foreach (var slideChar in SlideTypeChars)
+            {
+                if (idx < content.Length && content[idx] == slideChar)
+                {
+                    slide.SlideType = slideChar.ToString();
+                    idx++;
+                    break;
+                }
             }
         }
 
@@ -702,10 +970,11 @@ public static class SimaiChecker
 
         if (slide.SlideType == "V")
         {
-            if (idx >= content.Length || !char.IsDigit(content[idx]))
-                return slide;
-            slide.FlexionPoint = content[idx] - '0';
-            idx++;
+            if (idx < content.Length && char.IsDigit(content[idx]))
+            {
+                slide.FlexionPoint = content[idx] - '0';
+                idx++;
+            }
         }
 
         if (idx < content.Length && char.IsDigit(content[idx]))
@@ -726,9 +995,15 @@ public static class SimaiChecker
             }
         }
 
-        if (idx < content.Length && content[idx] == 'b')
+        if (idx < content.Length && char.ToLowerInvariant(content[idx]) == 'b')
         {
             slide.IsBreak = true;
+            idx++;
+        }
+
+        if (idx < content.Length && char.ToLowerInvariant(content[idx]) == 'm')
+        {
+            slide.IsMine = true;
             idx++;
         }
 
@@ -810,33 +1085,12 @@ public static class SimaiChecker
             );
         }
 
-        if (info.IsHold)
+        if (info.IsHold && info.Duration != null)
         {
-            if (info.Duration == null)
-            {
-                // 纯 HOLD (如 "2h") 允许无时长，但有修饰符时必须有时长
-                var hasModifiers = info.IsBreak || info.IsEx || info.IsMine || 
-                                   info.HasStar || info.HasDoubleStar || info.NoStar ||
-                                   info.FadeSlide || info.NoFadeSlide;
-                if (hasModifiers)
-                {
-                    context.AddError(
-                        "HOLD with modifiers must have duration",
-                        "HOLD notes with modifiers (b, x, m, $, @, ?, !) must specify a duration, e.g., 2hb[4:1]",
-                        startPos
-                    );
-                }
-            }
-            else
-            {
-                ValidateDuration(context, content, startPos, info.Duration, info.DurationStart, "HOLD");
-            }
+            ValidateDuration(context, content, startPos, info.Duration, info.DurationStart, "HOLD", allowSlideFormat: false);
         }
 
-        foreach (var slide in info.Slides)
-        {
-            ValidateSlide(context, content, startPos, info, slide);
-        }
+        ValidateSlidesDuration(context, content, startPos, info);
 
         if (!info.IsHold && info.Slides.Count == 0 && info.Duration != null)
         {
@@ -848,8 +1102,96 @@ public static class SimaiChecker
         }
     }
 
+    private static void ValidateSlidesDuration(CheckerContext context, string content, TextPosition startPos, NoteInfo info)
+    {
+        if (info.Slides.Count == 0) return;
+
+        if (info.HasSameStartPointSlides)
+        {
+            var chains = SplitIntoSlideChains(info.Slides);
+            foreach (var chain in chains)
+            {
+                ValidateSlideChain(context, content, startPos, chain);
+            }
+        }
+        else
+        {
+            ValidateSlideChain(context, content, startPos, info.Slides);
+        }
+    }
+
+    private static List<List<SlideInfo>> SplitIntoSlideChains(List<SlideInfo> slides)
+    {
+        var chains = new List<List<SlideInfo>>();
+        var currentChain = new List<SlideInfo>();
+
+        foreach (var slide in slides)
+        {
+            if (slide.IsSameHeadChainStart && currentChain.Count > 0)
+            {
+                chains.Add(currentChain);
+                currentChain = new List<SlideInfo>();
+            }
+            currentChain.Add(slide);
+        }
+
+        if (currentChain.Count > 0)
+        {
+            chains.Add(currentChain);
+        }
+
+        return chains;
+    }
+
+    private static void ValidateSlideChain(CheckerContext context, string content, TextPosition startPos, List<SlideInfo> chain)
+    {
+        if (chain.Count == 0) return;
+
+        var slidesWithDuration = chain.Count(s => s.Duration != null);
+        var lastSlide = chain[^1];
+
+        foreach (var slide in chain)
+        {
+            ValidateSlide(context, content, startPos, slide, checkDuration: false);
+        }
+
+        if (slidesWithDuration == 0)
+        {
+            context.AddError(
+                "Slide missing duration",
+                "Slide must have a duration specified, e.g., [8:1] or [#1.5]",
+                startPos.Advance(content[..lastSlide.EndIndex])
+            );
+            return;
+        }
+
+        if (slidesWithDuration == chain.Count)
+        {
+            foreach (var slide in chain)
+            {
+                if (slide.Duration != null)
+                {
+                    ValidateDuration(context, content, startPos, slide.Duration, slide.DurationStart, "SLIDE", allowSlideFormat: true);
+                }
+            }
+            return;
+        }
+
+        if (slidesWithDuration == 1 && lastSlide.Duration != null)
+        {
+            ValidateDuration(context, content, startPos, lastSlide.Duration, lastSlide.DurationStart, "SLIDE", allowSlideFormat: true);
+            return;
+        }
+
+        context.AddError(
+            "Invalid slide duration specification",
+            "For connected slides, either all slides must have individual durations, or only the last slide can have a duration (applied to entire chain)",
+            startPos
+        );
+    }
+
     private static void ValidateDuration(CheckerContext context, string content, TextPosition startPos,
-        string duration, int durationStart, string noteType)
+        string duration, int durationStart, string noteType, bool allowSlideFormat)
     {
         if (string.IsNullOrEmpty(duration))
         {
@@ -861,22 +1203,18 @@ public static class SimaiChecker
             return;
         }
 
-        var hashCount = duration.Count(c => c == '#');
-        var colonCount = duration.Count(c => c == ':');
+        var hashCount = CountChar(duration, '#');
+        var colonCount = CountChar(duration, ':');
 
-        if (hashCount >= 2)
+        if (allowSlideFormat && hashCount >= 2)
         {
-            context.AddError(
-                $"Invalid duration format: '{duration}'",
-                $"{noteType} does not support '##' format. Use 'division:beats', '#seconds', or 'BPM#division:beats'",
-                startPos.Advance(content[..(durationStart + 1)])
-            );
+            ValidateSlideDuration(context, content, startPos, duration, durationStart);
             return;
         }
 
         if (hashCount == 0 && colonCount == 0)
         {
-            if (!double.TryParse(duration, out var val) || val <= 0)
+            if (!double.TryParse(duration, NumberStyles.Float, CultureInfo.InvariantCulture, out var val) || val <= 0)
             {
                 context.AddError(
                     $"Invalid duration: '{duration}'",
@@ -887,64 +1225,12 @@ public static class SimaiChecker
         }
         else if (hashCount == 0 && colonCount == 1)
         {
-            var parts = duration.Split(':');
-            if (parts.Length != 2)
-            {
-                context.AddError(
-                    $"Invalid duration format: '{duration}'",
-                    "Duration format should be 'division:beats', e.g., '4:2' means 2 beats at quarter note division",
-                    startPos.Advance(content[..(durationStart + 1)])
-                );
-                return;
-            }
-
-            if (!int.TryParse(parts[0], out var division) || division <= 0)
-            {
-                context.AddError(
-                    $"Invalid division: '{parts[0]}'",
-                    "Division must be a positive integer (e.g., 4 for quarter note, 8 for eighth note)",
-                    startPos.Advance(content[..(durationStart + 1)])
-                );
-            }
-
-            if (!int.TryParse(parts[1], out var beats) || beats < 0)
-            {
-                context.AddError(
-                    $"Invalid beat count: '{parts[1]}'",
-                    "Beat count must be a non-negative integer",
-                    startPos.Advance(content[..(durationStart + 1 + parts[0].Length + 1)])
-                );
-            }
-        }
-        else if (hashCount == 1 && !duration.StartsWith('#'))
-        {
-            var parts = duration.Split('#');
-            if (parts.Length != 2)
-            {
-                context.AddError(
-                    $"Invalid duration format: '{duration}'",
-                    "Duration format should be 'BPM#division:count' or 'BPM#seconds'",
-                    startPos.Advance(content[..(durationStart + 1)])
-                );
-                return;
-            }
-
-            if (!double.TryParse(parts[0], out var bpm) || bpm <= 0)
-            {
-                context.AddError(
-                    $"Invalid BPM: '{parts[0]}'",
-                    "BPM must be a positive number",
-                    startPos.Advance(content[..(durationStart + 1)])
-                );
-                return;
-            }
-
-            ValidateDurationPart(context, content, startPos, parts[1], durationStart + 1 + parts[0].Length + 1);
+            ValidateRatioDuration(context, content, startPos, duration, durationStart);
         }
         else if (hashCount == 1 && duration.StartsWith('#'))
         {
             var timeValue = duration[1..];
-            if (!double.TryParse(timeValue, out var time) || time <= 0)
+            if (!double.TryParse(timeValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var time) || time <= 0)
             {
                 context.AddError(
                     $"Invalid absolute time: '{timeValue}'",
@@ -953,269 +1239,164 @@ public static class SimaiChecker
                 );
             }
         }
+        else if (hashCount == 1 && !duration.StartsWith('#'))
+        {
+            ValidateCustomBpmDuration(context, content, startPos, duration, durationStart);
+        }
         else
         {
             context.AddError(
                 $"Invalid duration format: '{duration}'",
-                "Too many '#' characters in duration specification",
+                "Duration format is invalid. Use 'division:beats', '#seconds', or 'BPM#division:beats'",
                 startPos.Advance(content[..(durationStart + 1)])
             );
-        }
-    }
-
-    private static void ValidateDurationPart(CheckerContext context, string content, TextPosition startPos,
-        string part, int offset)
-    {
-        if (part.Contains(':'))
-        {
-            var subParts = part.Split(':');
-            if (subParts.Length != 2)
-            {
-                context.AddError(
-                    $"Invalid note ratio: '{part}'",
-                    "Note ratio should be 'length:count', e.g., '8:1'",
-                    startPos.Advance(content[..offset])
-                );
-                return;
-            }
-
-            if (!int.TryParse(subParts[0], out var div) || div <= 0)
-            {
-                context.AddError(
-                    $"Invalid division: '{subParts[0]}'",
-                    "Division must be a positive integer",
-                    startPos.Advance(content[..offset])
-                );
-            }
-
-            if (!int.TryParse(subParts[1], out var count) || count < 0)
-            {
-                context.AddError(
-                    $"Invalid count: '{subParts[1]}'",
-                    "Count must be a non-negative integer",
-                    startPos.Advance(content[..(offset + subParts[0].Length + 1)])
-                );
-            }
-        }
-        else
-        {
-            if (!double.TryParse(part, out var time) || time <= 0)
-            {
-                context.AddError(
-                    $"Invalid duration: '{part}'",
-                    "Duration must be a positive number",
-                    startPos.Advance(content[..offset])
-                );
-            }
         }
     }
 
     private static void ValidateSlideDuration(CheckerContext context, string content, TextPosition startPos,
         string duration, int durationStart)
     {
-        if (string.IsNullOrEmpty(duration))
+        var parts = SplitByChar(duration, '#');
+
+        if (parts.Count < 3)
         {
             context.AddError(
-                "Empty duration for SLIDE",
-                "Duration cannot be empty",
-                startPos.Advance(content[..durationStart])
+                $"Invalid slide duration format: '{duration}'",
+                "Slide duration with '##' should be 'startTime##moveTime'",
+                startPos.Advance(content[..(durationStart + 1)])
             );
             return;
         }
 
-        var hashCount = duration.Count(c => c == '#');
-
-        // SLIDE 支持 startTime##moveTime 格式（两个 # 表示开始时间和移动时间）
-        if (hashCount == 2)
+        var startTimeStr = parts[0];
+        if (!string.IsNullOrEmpty(startTimeStr))
         {
-            var parts = duration.Split('#');
-            if (parts.Length != 3)
+            if (!double.TryParse(startTimeStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var startTime) || startTime < 0)
             {
                 context.AddError(
-                    $"Invalid duration format: '{duration}'",
-                    "SLIDE duration format should be 'startTime##moveTime', e.g., '1.5##4:1' means start at 1.5s, move for 1 beat of quarter note",
+                    $"Invalid slide start time: '{startTimeStr}'",
+                    "Slide start time must be a non-negative number (in seconds)",
                     startPos.Advance(content[..(durationStart + 1)])
                 );
-                return;
             }
-
-            // 验证开始时间（必须是绝对时间）
-            ValidateAbsoluteTime(context, content, startPos, parts[0], durationStart + 1);
-            // 验证移动时间（可以是任何有效格式）
-            ValidateSimpleDuration(context, content, startPos, parts[2], durationStart + 1 + parts[0].Length + 2);
         }
-        else if (hashCount > 2)
+
+        var moveTimeStr = parts[^1];
+        var moveTimeOffset = durationStart + 1 + duration.LastIndexOf('#') + 1;
+
+        if (string.IsNullOrEmpty(moveTimeStr))
+        {
+            context.AddError(
+                "Empty slide move time",
+                "Slide move time cannot be empty",
+                startPos.Advance(content[..moveTimeOffset])
+            );
+            return;
+        }
+
+        if (moveTimeStr.Contains(':'))
+        {
+            ValidateRatioDuration(context, content, startPos, moveTimeStr, moveTimeOffset - 1);
+        }
+        else if (!double.TryParse(moveTimeStr, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+        {
+            context.AddError(
+                $"Invalid slide move time: '{moveTimeStr}'",
+                "Slide move time must be a number or ratio format like '8:1'",
+                startPos.Advance(content[..moveTimeOffset])
+            );
+        }
+    }
+
+    private static void ValidateRatioDuration(CheckerContext context, string content, TextPosition startPos,
+        string duration, int durationStart)
+    {
+        var colonIdx = duration.IndexOf(':');
+        if (colonIdx <= 0 || colonIdx == duration.Length - 1)
         {
             context.AddError(
                 $"Invalid duration format: '{duration}'",
-                "SLIDE duration supports 'startTime##moveTime' format with exactly 2 '#' characters, or standard duration formats",
+                "Duration format should be 'division:beats', e.g., '4:2' means 2 beats at quarter note division",
+                startPos.Advance(content[..(durationStart + 1)])
+            );
+            return;
+        }
+
+        var divisionStr = duration[..colonIdx];
+        var beatsStr = duration[(colonIdx + 1)..];
+
+        if (!int.TryParse(divisionStr, out var division) || division <= 0)
+        {
+            context.AddError(
+                $"Invalid division: '{divisionStr}'",
+                "Division must be a positive integer (e.g., 4 for quarter note, 8 for eighth note)",
                 startPos.Advance(content[..(durationStart + 1)])
             );
         }
-        else
-        {
-            // 单个时长（只有移动时间）
-            ValidateSimpleDuration(context, content, startPos, duration, durationStart + 1);
-        }
-    }
 
-    private static void ValidateAbsoluteTime(CheckerContext context, string content, TextPosition startPos,
-        string timeStr, int offset)
-    {
-        if (!double.TryParse(timeStr, out var time) || time <= 0)
+        if (!int.TryParse(beatsStr, out var beats) || beats < 0)
         {
             context.AddError(
-                $"Invalid start time: '{timeStr}'",
-                "Start time must be a positive number (in seconds)",
-                startPos.Advance(content[..offset])
+                $"Invalid beat count: '{beatsStr}'",
+                "Beat count must be a non-negative integer",
+                startPos.Advance(content[..(durationStart + 1 + colonIdx + 1)])
             );
         }
     }
 
-    private static void ValidateSimpleDuration(CheckerContext context, string content, TextPosition startPos,
-        string duration, int offset)
+    private static void ValidateCustomBpmDuration(CheckerContext context, string content, TextPosition startPos,
+        string duration, int durationStart)
     {
-        var hashCount = duration.Count(c => c == '#');
-        var colonCount = duration.Count(c => c == ':');
+        var hashIdx = duration.IndexOf('#');
+        var bpmStr = duration[..hashIdx];
+        var restStr = duration[(hashIdx + 1)..];
 
-        if (hashCount == 0 && colonCount == 0)
-        {
-            if (!double.TryParse(duration, out var val) || val <= 0)
-            {
-                context.AddError(
-                    $"Invalid duration: '{duration}'",
-                    "Duration must be a positive number or use format like '8:1' or '#1.5'",
-                    startPos.Advance(content[..offset])
-                );
-            }
-        }
-        else if (hashCount == 0 && colonCount == 1)
-        {
-            var parts = duration.Split(':');
-            if (parts.Length != 2)
-            {
-                context.AddError(
-                    $"Invalid duration format: '{duration}'",
-                    "Duration format should be 'division:beats', e.g., '4:2' means 2 beats at quarter note division",
-                    startPos.Advance(content[..offset])
-                );
-                return;
-            }
-
-            if (!int.TryParse(parts[0], out var division) || division <= 0)
-            {
-                context.AddError(
-                    $"Invalid division: '{parts[0]}'",
-                    "Division must be a positive integer (e.g., 4 for quarter note, 8 for eighth note)",
-                    startPos.Advance(content[..offset])
-                );
-            }
-
-            if (!int.TryParse(parts[1], out var beats) || beats < 0)
-            {
-                context.AddError(
-                    $"Invalid beat count: '{parts[1]}'",
-                    "Beat count must be a non-negative integer",
-                    startPos.Advance(content[..(offset + parts[0].Length + 1)])
-                );
-            }
-        }
-        else if (hashCount == 1 && !duration.StartsWith('#'))
-        {
-            var parts = duration.Split('#');
-            if (parts.Length != 2)
-            {
-                context.AddError(
-                    $"Invalid duration format: '{duration}'",
-                    "Duration format should be 'BPM#division:count' or 'BPM#seconds'",
-                    startPos.Advance(content[..offset])
-                );
-                return;
-            }
-
-            if (!double.TryParse(parts[0], out var bpm) || bpm <= 0)
-            {
-                context.AddError(
-                    $"Invalid BPM: '{parts[0]}'",
-                    "BPM must be a positive number",
-                    startPos.Advance(content[..offset])
-                );
-                return;
-            }
-
-            ValidateSimpleDurationPart(context, content, startPos, parts[1], offset + 1 + parts[0].Length + 1);
-        }
-        else if (hashCount == 1 && duration.StartsWith('#'))
-        {
-            var timeValue = duration[1..];
-            if (!double.TryParse(timeValue, out var time) || time <= 0)
-            {
-                context.AddError(
-                    $"Invalid absolute time: '{timeValue}'",
-                    "Absolute time must be a positive number (in seconds)",
-                    startPos.Advance(content[..(offset + 1)])
-                );
-            }
-        }
-        else
+        if (string.IsNullOrEmpty(bpmStr))
         {
             context.AddError(
-                $"Invalid duration format: '{duration}'",
-                "Too many '#' characters in duration specification",
-                startPos.Advance(content[..offset])
+                "Empty BPM in duration",
+                "Custom BPM cannot be empty",
+                startPos.Advance(content[..(durationStart + 1)])
             );
+            return;
         }
-    }
 
-    private static void ValidateSimpleDurationPart(CheckerContext context, string content, TextPosition startPos,
-        string part, int offset)
-    {
-        if (part.Contains(':'))
+        if (!double.TryParse(bpmStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var bpm) || bpm <= 0)
         {
-            var subParts = part.Split(':');
-            if (subParts.Length != 2)
-            {
-                context.AddError(
-                    $"Invalid duration ratio: '{part}'",
-                    "Duration ratio should be 'division:beats', e.g., '8:1'",
-                    startPos.Advance(content[..offset])
-                );
-                return;
-            }
-
-            if (!int.TryParse(subParts[0], out var div) || div <= 0)
-            {
-                context.AddError(
-                    $"Invalid division: '{subParts[0]}'",
-                    "Division must be a positive integer",
-                    startPos.Advance(content[..offset])
-                );
-            }
-
-            if (!int.TryParse(subParts[1], out var count) || count < 0)
-            {
-                context.AddError(
-                    $"Invalid count: '{subParts[1]}'",
-                    "Count must be a non-negative integer",
-                    startPos.Advance(content[..(offset + subParts[0].Length + 1)])
-                );
-            }
+            context.AddError(
+                $"Invalid BPM: '{bpmStr}'",
+                "BPM must be a positive number",
+                startPos.Advance(content[..(durationStart + 1)])
+            );
+            return;
         }
-        else
+
+        if (string.IsNullOrEmpty(restStr))
         {
-            if (!double.TryParse(part, out var time) || time <= 0)
-            {
-                context.AddError(
-                    $"Invalid duration: '{part}'",
-                    "Duration must be a positive number",
-                    startPos.Advance(content[..offset])
-                );
-            }
+            context.AddError(
+                "Empty duration after BPM",
+                "Duration must be specified after BPM",
+                startPos.Advance(content[..(durationStart + 1 + hashIdx + 1)])
+            );
+            return;
+        }
+
+        if (restStr.Contains(':'))
+        {
+            ValidateRatioDuration(context, content, startPos, restStr, durationStart + 1 + hashIdx);
+        }
+        else if (!double.TryParse(restStr, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+        {
+            context.AddError(
+                $"Invalid duration: '{restStr}'",
+                "Duration must be a number or ratio format like '8:1'",
+                startPos.Advance(content[..(durationStart + 1 + hashIdx + 1)])
+            );
         }
     }
 
     private static void ValidateSlide(CheckerContext context, string content, TextPosition startPos,
-        NoteInfo noteInfo, SlideInfo slide)
+        SlideInfo slide, bool checkDuration)
     {
         if (slide.EndPosition == null)
         {
@@ -1237,53 +1418,37 @@ public static class SimaiChecker
             return;
         }
 
-        var startPosValue = noteInfo.StartPosition;
-
-        if (!IsValidSlidePath(slide.SlideType!, startPosValue, slide.EndPosition.Value, slide.FlexionPoint))
+        if (!IsValidSlidePath(slide.SlideType!, slide.StartPosition, slide.EndPosition.Value, slide.FlexionPoint))
         {
-            var detail = GetSlidePathErrorDetail(slide.SlideType!, startPosValue, slide.EndPosition.Value, slide.FlexionPoint);
+            var detail = GetSlidePathErrorDetail(slide.SlideType!, slide.StartPosition, slide.EndPosition.Value, slide.FlexionPoint);
             context.AddError(
-                $"Invalid slide path: {startPosValue}{slide.SlideType}{slide.FlexionPoint}{slide.EndPosition}",
+                $"Invalid slide path: {slide.StartPosition}{slide.SlideType}{slide.FlexionPoint}{slide.EndPosition}",
                 detail,
                 startPos.Advance(content[..slide.StartIndex])
             );
         }
 
-        if (slide.Duration == null && noteInfo.Duration == null)
+        if (checkDuration && slide.Duration != null)
         {
-            context.AddError(
-                "Slide missing duration",
-                "Slide must have a duration specified, e.g., [8:1] or [#1.5]",
-                startPos.Advance(content[..slide.EndIndex])
-            );
-        }
-        else if (slide.Duration != null)
-        {
-            ValidateSlideDuration(context, content, startPos, slide.Duration, slide.DurationStart);
+            ValidateDuration(context, content, startPos, slide.Duration, slide.DurationStart, "SLIDE", allowSlideFormat: true);
         }
     }
 
     private static bool IsValidSlidePath(string slideType, int start, int end, int? flexionPoint)
     {
-        if (start == end) return false;
-
         var interval = GetPointInterval(start, end);
 
         return slideType switch
         {
             "-" => interval >= 2,
-            "^" => interval is not (0 or 4),
-            "v" => interval is not (0 or 4),
-            "<" => true,
-            ">" => true,
-            "V" => flexionPoint.HasValue && GetPointInterval(start, flexionPoint.Value) == 2 && GetPointInterval(flexionPoint.Value, end) >= 2,
-            "p" => true,
-            "q" => true,
-            "pp" => IsOpposite(start, end),
-            "qq" => IsOpposite(start, end),
-            "s" => IsOpposite(start, end),
-            "z" => IsOpposite(start, end),
-            "w" => IsOpposite(start, end),
+            "^" or "v" => interval is not (0 or 4),
+            "<" or ">" => true,
+            "V" => flexionPoint.HasValue &&
+                   GetPointInterval(start, flexionPoint.Value) == 2 &&
+                   GetPointInterval(flexionPoint.Value, end) >= 2 &&
+                   start != end,
+            "p" or "q" or "pp" or "qq" => true,
+            "s" or "z" or "w" => interval == 4,
             _ => true
         };
     }
@@ -1294,10 +1459,11 @@ public static class SimaiChecker
         {
             "-" => "Straight slide requires start and end positions to be at least 2 buttons apart",
             "^" or "v" => "This slide type cannot connect adjacent buttons or opposite buttons",
+            "p" or "q" or "pp" or "qq" => "p/q/pp/qq slide cannot connect adjacent buttons",
             "V" => flexionPoint == null
                 ? "V-shaped slide requires a flexion point, e.g., 1V35"
                 : "V-shaped slide requires flexion point to be exactly 2 buttons from start, and end to be at least 2 buttons from flexion point",
-            "pp" or "qq" or "s" or "z" or "w" => "This slide type requires start and end positions to be opposite (diagonally across)",
+            "s" or "z" or "w" => "This slide type requires start and end positions to be opposite (diagonally across)",
             _ => "Invalid slide path"
         };
     }
@@ -1326,28 +1492,57 @@ public static class SimaiChecker
         };
     }
 
-    private static bool IsOpposite(int a, int b)
+    private static void CheckChartTermination(CheckerContext context, List<ChartSegment> segments)
     {
-        return GetPointInterval(a, b) == 4;
-    }
+        ChartSegment? lastNonEmptySegment = null;
 
-    private static void CheckChartTermination(CheckerContext context, List<ChartSegment> segments, string fumen)
-    {
-        var nonEmptySegments = segments.Where(s => s.Content != "," && !string.IsNullOrWhiteSpace(s.Content)).ToList();
+        for (var i = segments.Count - 1; i >= 0; i--)
+        {
+            var seg = segments[i];
+            if (!string.IsNullOrWhiteSpace(seg.Content) && seg.Content != ",")
+            {
+                lastNonEmptySegment = seg;
+                break;
+            }
+        }
 
-        if (nonEmptySegments.Count == 0) return;
+        if (lastNonEmptySegment == null) return;
 
-        var lastSegment = nonEmptySegments.Last();
-
-        if (lastSegment.Content != "E")
+        if (lastNonEmptySegment.Content != "E")
         {
             context.AddWarning(
                 "Chart not terminated with 'E'",
                 "Simai charts should end with 'E' to mark the end of the chart",
-                lastSegment.StartPosition,
-                new QuickFix(",E", lastSegment.StartPosition.Advance(lastSegment.Content))
+                lastNonEmptySegment.StartPosition,
+                new QuickFix(",E", lastNonEmptySegment.StartPosition.Advance(lastNonEmptySegment.Content))
             );
         }
+    }
+
+    private static int CountChar(string s, char c)
+    {
+        var count = 0;
+        foreach (var ch in s)
+        {
+            if (ch == c) count++;
+        }
+        return count;
+    }
+
+    private static List<string> SplitByChar(string s, char c)
+    {
+        var result = new List<string>();
+        var start = 0;
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] == c)
+            {
+                result.Add(s[start..i]);
+                start = i + 1;
+            }
+        }
+        result.Add(s[start..]);
+        return result;
     }
 
     private record ChartSegment(string Content, TextPosition StartPosition, int Length);
@@ -1365,6 +1560,7 @@ public static class SimaiChecker
         public bool FadeSlide { get; set; }
         public bool NoFadeSlide { get; set; }
         public bool HasSameStartPointSlides { get; set; }
+        public bool NextSlideIsSameHeadChainStart { get; set; }
         public string? Duration { get; set; }
         public int DurationStart { get; set; }
         public int DurationEnd { get; set; }
@@ -1382,14 +1578,17 @@ public static class SimaiChecker
         public int DurationStart { get; set; }
         public int DurationEnd { get; set; }
         public bool IsBreak { get; set; }
+        public bool IsMine { get; set; }
         public int StartIndex { get; set; }
         public int EndIndex { get; set; }
+        public bool IsSameHeadChainStart { get; set; }
     }
 
     private class CheckerContext
     {
         public string Source { get; }
         public List<Diagnostic> Diagnostics { get; } = new();
+        public bool HasBpmDefinition { get; set; }
 
         public CheckerContext(string source)
         {
