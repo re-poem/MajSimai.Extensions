@@ -35,10 +35,35 @@ public static class SimaiChecker
         var newlines = new List<(int Index, TextPosition OriginalPos)>();
         
         var originalPos = TextPosition.Start;
+        var inComment = false;
         
         for (var i = 0; i < fumen.Length; i++)
         {
             var c = fumen[i];
+            
+            if (inComment)
+            {
+                if (c == '\n')
+                {
+                    // 遇到换行符时自动结束注释
+                    inComment = false;
+                    newlines.Add((i, originalPos));
+                    originalPos = originalPos.Advance(c);
+                }
+                else
+                {
+                    originalPos = originalPos.Advance(c);
+                }
+                continue;
+            }
+            
+            if (c == '|' && i + 1 < fumen.Length && fumen[i + 1] == '|')
+            {
+                inComment = true;
+                i++;
+                originalPos = originalPos.Advance('|').Advance('|');
+                continue;
+            }
             
             if (c == '\n')
             {
@@ -249,35 +274,10 @@ public static class SimaiChecker
     {
         var segments = new List<ChartSegment>();
         var currentStart = 0;
-        var inComment = false;
 
         for (var i = 0; i < fumen.Length; i++)
         {
             var c = fumen[i];
-
-            if (inComment)
-            {
-                if (c == '|' && i + 1 < fumen.Length && fumen[i + 1] == '|')
-                {
-                    inComment = false;
-                    i++;
-                    currentStart = i + 1;
-                }
-                continue;
-            }
-
-            if (c == '|' && i + 1 < fumen.Length && fumen[i + 1] == '|')
-            {
-                if (i > currentStart)
-                {
-                    var startPos = GetOriginalPosition(positionMap, currentStart);
-                    segments.Add(new ChartSegment(fumen[currentStart..i], startPos, i - currentStart));
-                }
-                inComment = true;
-                i++;
-                currentStart = i + 1;
-                continue;
-            }
 
             if (c == ',')
             {
@@ -289,6 +289,18 @@ public static class SimaiChecker
                 var commaPos = GetOriginalPosition(positionMap, i);
                 segments.Add(new ChartSegment(",", commaPos, 1));
                 currentStart = i + 1;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(c))
+            {
+                if (i > currentStart)
+                {
+                    var startPos = GetOriginalPosition(positionMap, currentStart);
+                    segments.Add(new ChartSegment(fumen[currentStart..i], startPos, i - currentStart));
+                }
+                currentStart = i + 1;
+                continue;
             }
         }
 
@@ -322,9 +334,23 @@ public static class SimaiChecker
         var content = segment.Content;
         var startPos = segment.StartPosition;
 
-        if (content == "E")
+        // 检查是否包含 E 后面跟着注释
+        var eIndex = content.IndexOf('E');
+        if (eIndex != -1)
         {
-            return;
+            // 检查 E 后面是否有注释
+            var afterE = content[(eIndex + 1)..];
+            var commentStart = afterE.IndexOf("||");
+            if (commentStart != -1)
+            {
+                // 如果 E 后面跟着注释，只处理 E 部分
+                return;
+            }
+            // 如果 E 是单独的字符，直接返回
+            if (content == "E")
+            {
+                return;
+            }
         }
 
         var noteStart = 0;
