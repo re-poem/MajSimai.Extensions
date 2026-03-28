@@ -34,8 +34,6 @@ public static class TrackProcessor
 
         string ext = Path.GetExtension(filePath).ToLower();
         bool isAudio = ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".flac";
-
-        // 核心修复：根据后缀名决定音频编码器。如果是 .mp3，必须使用 libmp3lame 才能存入 .mp3 容器
         string audioCodec = (ext == ".mp3") ? "libmp3lame" : "aac";
 
         string tempPath = Path.Combine(Path.GetDirectoryName(filePath)!, $"t_{Guid.NewGuid()}{ext}");
@@ -71,8 +69,7 @@ public static class TrackProcessor
             RunFFmpeg(ffmpegPath, args);
             if (File.Exists(tempPath))
             {
-                // 确保原文件未被占用
-                File.Delete(filePath);
+                File.Move(filePath, Path.Combine(Path.GetDirectoryName(filePath)!, $"raw{ext}"));
                 File.Move(tempPath, filePath);
             }
         }
