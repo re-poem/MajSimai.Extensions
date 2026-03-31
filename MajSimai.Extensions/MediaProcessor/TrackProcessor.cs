@@ -69,7 +69,12 @@ public static class TrackProcessor
             RunFFmpeg(ffmpegPath, args);
             if (File.Exists(tempPath))
             {
-                File.Move(filePath, Path.Combine(Path.GetDirectoryName(filePath)!, $"raw{ext}"));
+                var rawPath = Path.Combine(Path.GetDirectoryName(filePath)!, $"raw{ext}");
+                if (File.Exists(rawPath))
+                {
+                    File.Delete(rawPath);
+                }
+                File.Move(filePath, rawPath);
                 File.Move(tempPath, filePath);
             }
         }
