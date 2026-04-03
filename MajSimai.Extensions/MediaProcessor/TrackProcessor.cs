@@ -25,7 +25,8 @@ public static class TrackProcessor
     /// <param name="filePath">要处理的文件路径（视频或音频）</param>
     /// <param name="targetTime">目标时间</param>
     /// <param name="offset">当前实际偏移量</param>
-    public static void AdjustMediaTime(string ffmpegPath, string filePath, double targetTime, double offset)
+    /// <param name="clone">是否使用静帧填充开头（否则使用黑帧）</param>
+    public static void AdjustMediaTime(string ffmpegPath, string filePath, double targetTime, double offset, bool clone = false)
     {
         if (!File.Exists(filePath)) return;
 
@@ -60,7 +61,10 @@ public static class TrackProcessor
             else
             {
                 // 视频：tpad 补静帧，adelay 补静音
-                args = $"-y -i \"{filePath}\" -filter_complex \"[0:v]tpad=start_duration={diff}:start_mode=clone[v];[0:a]adelay={delayMs}:all=1[a]\" -map \"[v]\" -map \"[a]\" -c:v libx264 -c:a {audioCodec} -preset superfast \"{tempPath}\"";
+                if (clone)
+                    args = $"-y -i \"{filePath}\" -filter_complex \"[0:v]tpad=start_duration={diff}:start_mode=clone[v];[0:a]adelay={delayMs}:all=1[a]\" -map \"[v]\" -map \"[a]\" -c:v libx264 -c:a {audioCodec} -preset superfast \"{tempPath}\"";
+                else    
+                    args = $"-y -i \"{filePath}\" -filter_complex \"[0:v]tpad=start_duration={diff}:start_mode=add[v];[0:a]adelay={delayMs}:all=1[a]\" -map \"[v]\" -map \"[a]\" -c:v libx264 -c:a {audioCodec} -preset superfast \"{tempPath}\"";
             }
         }
 
